@@ -1,0 +1,122 @@
+Write-Host "--- Windows Software Update Script (using winget) ---"
+Write-Host "This script will check for available software updates via winget."
+Write-Host "You may be prompted for elevation (UAC) if winget requires it for updates."
+
+function Test-WingetAvailability {
+    try {
+        $null = & winget --version 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "winget detected and ready." -ForegroundColor Green
+            return $true
+        } else {
+            Write-Host "winget command not found or returned an error. Please ensure winget is installed and added to your PATH." -ForegroundColor Red
+            return $false
+        }
+    } catch {
+        Write-Host "An error occurred while checking for winget: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Please ensure winget is installed and added to your PATH." -ForegroundColor Red
+        return $false
+    }
+}
+
+function Get-UpgradablePackages {
+    Write-Host "`nChecking for available updates with winget..."
+    try {
+        $wingetOutput = & winget upgrade 2>&1
+
+        $packages = @()
+        $capturePackages = $false
+        foreach ($line in $wingetOutput) {
+            if ($line -match '^-+$' -and $wingetOutput.IndexOf($line) -gt 0 -and $wingetOutput[$wingetOutput.IndexOf($line)-1] -match 'Name\s+Id\s+Version\s+Available\s+Source') {
+                $capturePackages = $true
+                continue
+            }
+            if ($capturePackages -and ($line -ne "" -and $line -notmatch '^No updates available|^Found [0-9]+ package')) {
+                 if ($line.Trim() -ne "") {
+                    $parts = $line.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
+                    if ($parts.Length -ge 2) {
+                        $packageId = $parts[1]
+                        $packages += [PSCustomObject]@{
+                            Name = $parts[0]
+                            Id = $packageId
+                            Version = $parts[2]
+                            Available = $parts[3]
+                            Source = $parts[-1]
+                        }
+                    }
+                 }
+            }
+        }
+
+        if ($packages.Count -eq 0) {
+            Write-Host "No updates available via winget." -ForegroundColor Yellow
+            return $null
+        } else {
+            Write-Host "Found $($packages.Count) packages with available updates:" -ForegroundColor Cyan
+            $packages | Format-Table -AutoSize
+            return $packages
+        }
+    } catch {
+        Write-Host "An error occurred while getting upgradable packages: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+}
+
+function Perform-Upgrade {
+    param (
+        [array]$packagesToUpgrade
+    )
+
+    if ($packagesToUpgrade.Count -eq 0) {
+        Write-Host "No packages selected for upgrade." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "`nStarting upgrade process..."
+    foreach ($pkg in $packagesToUpgrade) {
+        Write-Host "`nUpgrading $($pkg.Name) ($($pkg.Id))..." -ForegroundColor Green
+        try {
+            & winget upgrade --id "$($pkg.Id)" --silent --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Successfully upgraded $($pkg.Name)." -ForegroundColor DarkGreen
+            } else {
+                Write-Host "Failed to upgrade $($pkg.Name). Exit code: $LASTEXITCODE" -ForegroundColor Red
+                Write-Host "You might need to run winget as administrator, or the application might be in use." -ForegroundColor Red
+            }
+        } catch {
+            Write-Host "An error occurred during upgrade of $($pkg.Name): $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    Write-Host "`nUpgrade process complete."
+}
+
+if (-not (Test-WingetAvailability)) {
+    Write-Host "Cannot proceed. Please ensure winget is installed and configured correctly." -ForegroundColor Red
+    exit 1
+}
+
+$upgradablePackages = Get-UpgradablePackages
+
+if ($upgradablePackages) {
+    Read-Host "Press Enter to continue..."
+
+    $choice = Read-Host "Enter 'all' to upgrade all, or list package IDs separated by commas (e.g., 'Google.Chrome,Microsoft.Edge'). Type 'n' to skip: "
+
+    if ($choice -eq "all") {
+        Perform-Upgrade -packagesToUpgrade $upgradablePackages
+    } elseif ($choice -ne "n" -and $choice -ne "") {
+        $selectedIds = $choice.Split(',') | ForEach-Object { $_.Trim() }
+        $filteredPackages = $upgradablePackages | Where-Object { $_.Id -in $selectedIds }
+        if ($filteredPackages.Count -gt 0) {
+            Perform-Upgrade -packagesToUpgrade $filteredPackages
+        } else {
+            Write-Host "No valid packages selected for upgrade." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "Software update skipped as per your choice." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "No upgradable software found or an error occurred." -ForegroundColor Yellow
+}
+
+Write-Host "`n--- Script execution complete. ---"
